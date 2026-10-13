@@ -87,7 +87,7 @@
                 box-shadow: none !important;
                 border: none !important;
                 page-break-inside: avoid !important;
-                page-break-after: avoid !important;
+                page-break-after: always !important;
             }
             @page {
                 size: A4 portrait;
@@ -399,6 +399,7 @@
             <!-- TAB CONTENT 3: CETAK RAPORT SISWA -->
             <div id="tab-content-cetak" class="hidden space-y-4">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+                    
                     <div>
                         <h3 class="text-sm font-extrabold text-slate-900">Daftar Cetak Raport</h3>
                         <p class="text-xs text-slate-500">Pilih siswa untuk meninjau dan mencetak lembar raport A4.</p>
@@ -660,10 +661,22 @@
         let globalSettings = {};
         let globalKKTP = {};
         let globalClassList = [];
+        let lastCetakScrollPosition = 0;
 
         window.onload = function() {
             checkFirstVisitWelcome();
             initApp();
+        };
+
+        // Setelah preview printer ditutup, kembalikan posisi ke bagian atas
+        // agar tombol Kembali Ke Dashboard langsung terlihat.
+        window.onafterprint = function() {
+            setTimeout(() => {
+                window.scrollTo({
+                    top: 0,
+                    behavior: 'smooth'
+                });
+            }, 300);
         };
 
         function checkFirstVisitWelcome() {
@@ -1002,6 +1015,7 @@
 
                 if (result.status === 'success') {
                     showToast('Catatan siswa berhasil disimpan!', 'success');
+                    await loadClassRekapData();
                 } else {
                     showToast(result.message, 'warning');
                 }
@@ -1013,26 +1027,109 @@
         }
 
         async function previewStudentReport(className, studentName) {
-            showSpinner(true, 'Menyiapkan lembar raport...');
+    // simpan posisi daftar cetak terakhir
+    lastCetakScrollPosition = window.scrollY;
 
-            try {
-                const res = await fetch(`${API_URL}?action=get_student_report&className=${encodeURIComponent(className)}&studentName=${encodeURIComponent(studentName)}`);
-                const result = await res.json();
+    showSpinner(true, 'Menyiapkan lembar raport...');
 
-                if (result.status === 'success') {
-                    populateReportPrintPage(result);
-                    showView('report-preview');
-                } else {
-                    showToast(result.message, 'warning');
-                }
-            } catch (err) {
-                showToast('Error memuat raport: ' + err.message, 'warning');
-            } finally {
-                showSpinner(false);
+    try {
+        // Bersihkan mode cetak semua jika sebelumnya digunakan
+        const oldContainer = document.getElementById('all-print-container');
+        if (oldContainer) oldContainer.remove();
+
+        const templatePage = document.querySelector('.print-page');
+        if (templatePage) templatePage.style.display = '';
+
+        const res = await fetch(`${API_URL}?action=get_student_report&className=${encodeURIComponent(className)}&studentName=${encodeURIComponent(studentName)}`);
+        const result = await res.json();
+
+        if (result.status === 'success') {
+            populateReportPrintPage(result);
+
+            // tampilkan halaman raport agar browser mengenali area print
+            showView('report-preview');
+
+            // langsung buka preview printer
+            setTimeout(() => {
+                window.print();
+            }, 700);
+
+        } else {
+            showToast(result.message, 'warning');
+        }
+
+    } catch (err) {
+        showToast('Error memuat raport: ' + err.message, 'warning');
+    } finally {
+        showSpinner(false);
+    }
+}
+
+
+async function printAllStudentsReport() {
+    if (!currentClassRekap || !currentClassRekap.students.length) {
+        showToast('Data siswa belum tersedia!', 'warning');
+        return;
+    }
+
+    showSpinner(true, 'Menyiapkan seluruh raport kelas...');
+
+    try {
+        let pages = '';
+        const templatePage = document.querySelector('.print-page');
+
+        // Buat halaman raport satu per satu tanpa memakai area preview utama
+        for (const st of currentClassRekap.students) {
+            const res = await fetch(
+                `${API_URL}?action=get_student_report&className=${encodeURIComponent(currentClassRekap.className)}&studentName=${encodeURIComponent(st.nama)}`
+            );
+            const result = await res.json();
+
+            if (result.status === 'success') {
+                populateReportPrintPage(result);
+                const clone = templatePage.cloneNode(true);
+                clone.style.display = 'block';
+                clone.classList.add('multi-print-page');
+                pages += clone.outerHTML;
             }
         }
 
-        function populateReportPrintPage(data) {
+        // Cetak melalui iframe khusus agar Chrome tidak mengambil halaman terakhir saja
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        document.body.appendChild(iframe);
+
+        const doc = iframe.contentWindow.document;
+        doc.open();
+        doc.write(`<!DOCTYPE html><html><head><title>Cetak Raport</title><style>
+            @page { size: A4 portrait; margin:0mm; }
+            body { margin:0; padding:0; }
+            .print-page { width:200mm; min-height:297mm; height:297mm; box-sizing:border-box; padding:4mm 5mm; page-break-after:always; overflow:hidden; }
+            table { width:100%; border-collapse:collapse; }
+            .multi-print-page { page-break-after:always; }
+        </style></head><body>${pages}</body></html>`);
+        doc.close();
+
+        iframe.onload = function() {
+            iframe.contentWindow.focus();
+            iframe.contentWindow.print();
+            setTimeout(() => iframe.remove(), 2000);
+        };
+
+    } catch (err) {
+        showToast('Gagal mencetak semua raport: ' + err.message, 'warning');
+    } finally {
+        showSpinner(false);
+    }
+}
+
+
+function populateReportPrintPage(data) {
             const st = data.student;
             const meta = data.meta;
             const stats = data.stats;
@@ -1088,6 +1185,14 @@
 
         function backToDashboard() {
             showView('dashboard');
+
+            // kembalikan posisi scroll terakhir pada daftar cetak raport
+            setTimeout(() => {
+                window.scrollTo({
+                    top: lastCetakScrollPosition,
+                    behavior: 'instant'
+                });
+            }, 100);
         }
 
         // FUNGSI NAVIGASI TAB DENGAN PROTEKSI PERAN KETAT
